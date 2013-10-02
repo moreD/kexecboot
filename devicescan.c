@@ -100,11 +100,12 @@ static struct dtypes_t dtypes[] = {
 };
 
 /* Import values from cfgdata and boot to bootconf */
-int addto_bootcfg(struct bootconf_t *bc, struct device_t *dev,
+int addto_bootcfg(struct bootconf_t *bc, struct charlist *fl,
 		struct cfgdata_t *cfgdata)
 {
 	struct boot_item_t *bi;
 	struct dtypes_t *dt;
+	struct device_t dev;
 	int i;
 	kx_cfg_section *sc;
 
@@ -118,10 +119,11 @@ int addto_bootcfg(struct bootconf_t *bc, struct device_t *dev,
 			DPRINTF("Can't allocate memory for new bootconf item");
 			return -1;
 		}
+		
+		devscan(sc->device, fl, &dev);
 
-		bi->device = strdup(dev->device);
-		bi->fstype = dev->fstype;
-		bi->blocks = dev->blocks;
+		bi->device = strdup(dev.device);
+		bi->fstype = dev.fstype;
 
 		bi->dtype = DVT_UNKNOWN;
 		for (dt = dtypes; dt->dtype != DVT_UNKNOWN; dt++) {
@@ -133,6 +135,10 @@ int addto_bootcfg(struct bootconf_t *bc, struct device_t *dev,
 		/* Section-dependent data */
 		bi->label = sc->label;
 		bi->kernelpath = sc->kernelpath;
+		bi->image = sc->image;
+		bi->imagepath = sc->imagepath;
+		bi->directory = sc->directory;
+		bi->boottype = sc->boottype;
 		bi->cmdline = sc->cmdline;
 		bi->initrd = sc->initrd;
 		bi->icondata = sc->icondata;
@@ -217,7 +223,7 @@ const char *detect_fstype(char *device, struct charlist *fl)
 
 	fd = open(device, O_RDONLY);
 	if (fd < 0) {
-		log_msg(lg, "+ can't open device: %s", ERRMSG);
+		log_msg(lg, "+ can't open device '%s': %s", device, ERRMSG);
 		return NULL;
 	}
 
@@ -295,106 +301,31 @@ int get_bootinfo(struct cfgdata_t *cfgdata)
 	return -1;
 }
 
-FILE *devscan_open(struct charlist **fslist)
+int devscan_open(struct charlist **fslist)
 {
-	FILE *f;
 	struct charlist *fl;
-	char line[80];
 
     /* Get a list of all filesystems registered in the kernel */
 	fl = scan_filesystems();
 	if (NULL == fl) {
-		return NULL;
+		return -1;
 	}
-
-	/* Get a list of available partitions on all devices
-	 * See kernel/block/genhd.c for details on interface */
-	f = fopen("/proc/partitions", "r");
-	if (NULL == f) {
-		log_msg(lg, "Can't open /proc/partitions: %s", ERRMSG);
-		goto free_fl;
-	}
-
-	// First two lines are bogus.
-	fgets(line, sizeof(line), f);
-	fgets(line, sizeof(line), f);
 
 	*fslist = fl;
-	return f;
-
-free_fl:
-	free_charlist(fl);
-
-	return NULL;
+	return 0;
 }
 
-int devscan_next(FILE *fp, struct charlist *fslist, struct device_t *dev)
+int devscan(char *device, struct charlist *fslist, struct device_t *dev)
 {
-	int major, minor, len;
-	unsigned long long blocks;
-	char *tmp, *p;
-	char *device;
-	char line[80];
-
-	if (NULL == fgets(line, sizeof(line), fp)) {
-		return 0;
-	}
-
-	/* Get major, minor, blocks and device name */
-	len = 0;
-	major = get_nni(line, &p);
-	minor = get_nni(p, &p);
-	blocks = get_nnll(p, &p, &len);	/* len is used as temp variable */
-	tmp = get_word(p, &p);
-
-	if (major < 0 || minor < 0 || NULL == tmp) {
-		log_msg(lg, "Can't parse partition string: '%s'", line);
-		return -1;
-	}
-
-	/* FIXME: 200k is hardcoded below */
-	if ((0 == len) && (blocks < 200)) {
-		log_msg(lg, "+ device (%d, %d) is too small (%dk < 200k), skipped", major, minor, blocks);
-		return -1;
-	}
-
-	/* Format device name */
-	len = p - tmp;
-	device = malloc(len + 5 + 1); /* 5 = strlen("/dev/") */
-	if (NULL == device) {
-		DPRINTF("Can't allocate memory for device name '%s'", tmp);
-		return -1;
-	}
-	strcpy(device, "/dev/");
-	strncat(device, tmp, len);
-
-	log_msg(lg, "Found device '%s' (%d, %d) of size %lluMb",
-			device, major, minor, blocks>>10);
-
-#ifdef USE_DEVICES_RECREATING
-	/* Remove old device node. We don't care about unlink() result. */
-	unlink(device);
-
-	/* Re-create device node */
-	log_msg(lg, "+ creating device node");
-	if ( -1 == mknod( device,
-			(S_IFBLK | S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH),
-			makedev(major, minor) ) )
-	{
-		log_msg(lg, "+ mknod failed: %s", ERRMSG);
-	}
-#endif
-
 	dev->fstype = detect_fstype(device, fslist);
 	if (NULL == dev->fstype) {
-		free(device);
 		return -1;
 	}
 
 	dev->device = device;
-	dev->blocks = blocks;
 
 	return 1;
 }
+
 
 

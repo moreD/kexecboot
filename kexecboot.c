@@ -25,11 +25,13 @@
 #include <linux/input.h>
 #include <unistd.h>
 #include <sys/mount.h>
+#include <linux/loop.h>
 #include <ctype.h>
 #include <errno.h>
 #include <sys/reboot.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <dirent.h>
 
 #include "config.h"
 #include "util.h"
@@ -55,6 +57,10 @@
 #ifdef USE_HOST_DEBUG
 #undef USE_DEVICES_RECREATING
 #endif
+
+#define __USE_LARGEFILE64
+#define _LARGEFILE_SOURCE
+#define _LARGEFILE64_SOURCE
 
 #ifdef USE_MACHINE_KERNEL
 /* Machine-dependent kernel patch */
@@ -168,200 +174,185 @@ char *get_machine_kernelpath() {
 #endif	/* USE_MACHINE_KERNEL */
 
 
-void start_kernel(struct params_t *params, int choice)
+int start_booting(struct params_t *params, int choice)
 {
-	/* we use var[] instead of *var because sizeof(var) using */
-#ifdef USE_HOST_DEBUG
-	const char kexec_path[] = "/bin/echo";
-#else
-	const char kexec_path[] = KEXEC_PATH;
-#endif
-	const char mount_point[] = MOUNTPOINT;
-
-	const char str_cmdline_start[] = "--command-line=root=";
-	const char str_rootfstype[] = " rootfstype=";
-	const char str_rootwait[] = " rootwait";
-	const char str_ubirootdev[] = "ubi0";
-	const char str_ubimtd[] = " ubi.mtd="; /* max ' ubi.mtd=15' len 11 +1 = 12 */
-
-#ifdef UBI_VID_HDR_OFFSET
-	const char str_ubimtd_off[] = UBI_VID_HDR_OFFSET;
-#else
-	const char str_ubimtd_off[] = "";
-#endif
-
-	char mount_dev[16];
-	char mount_fstype[16];
-	char str_mtd_id[3];
-
-	/* Tags passed from host kernel cmdline to kexec'ed kernel */
-	const char str_mtdparts[] = " mtdparts=";
-	const char str_fbcon[] = " fbcon=";
-
-	const char str_initrd_start[] = "--initrd=";
-
-	/* empty environment */
-	char *const envp[] = { NULL };
-
-	const char *load_argv[] = { NULL, "-l", NULL, NULL, NULL, NULL };
-	const char *exec_argv[] = { NULL, "-e", NULL, NULL};
-
-	char *cmdline_arg = NULL, *initrd_arg = NULL;
-	int n, idx, u;
-	struct stat sinfo;
 	struct boot_item_t *item;
-
+	int file_fd, device_fd;
+	
 	item = params->bootcfg->list[choice];
+	
+	if ( ! (item->boottype & BOOT_TYPE_LINUX)) {
+		char *const envp[] = { NULL };
+		const char *exec_argv[] = { "/init-android", NULL};
+		execve("/init-android", (char *const *)exec_argv, envp);
+	}
+	
+	if (item->boottype & BOOT_TYPE_IMAGE) {
+		if (-1 == mount(item->device, MOUNTPOINT, item->fstype, 0, NULL)) {
+			log_msg(lg, "+ can't mount device containing boot image file '%s': %s", item->device, ERRMSG);
+			return -1;
+		}
+		
+		file_fd = open64(item->imagepath, O_RDWR);
+		if (file_fd < 0) {
+			log_msg(lg, "open image file '%s' failed", item->imagepath);
+			umount(MOUNTPOINT);
+			return -1;
+		}
+		
+		device_fd = open("/dev/loop0", O_RDWR);
+		if (device_fd < 0) {
+			log_msg(lg, "open loop device failed");
+			close(file_fd);
+			umount(MOUNTPOINT);
+			return -1;
+		}
+		
+		if (ioctl(device_fd, LOOP_SET_FD, file_fd) < 0) {
+			log_msg(lg, "ioctl LOOP_SET_FD failed");
+			close(file_fd);
+			close(device_fd);
+			umount(MOUNTPOINT);
+			return -1;
+		}
+		
+		close(file_fd);
+		close(device_fd);
+		
+		mount("/dev/loop0", ROOTFS, "ext4", 0, NULL);
 
-	exec_argv[0] = kexec_path;
-	load_argv[0] = kexec_path;
-
-	/* --command-line arg generation */
-	idx = 2;	/* load_argv current option index */
-
-	/* fill '--command-line' option */
-	if (item->device) {
-		/* default device to mount */
-		strcpy(mount_dev, item->device);
-
+		log_msg(lg, "Image mounted!\n");
+	} else {
+		if (-1 == mount(item->device, ROOTFS, item->fstype, 0, NULL)) {
+			log_msg(lg, "+ can't mount boot device '%s': %s", item->device, ERRMSG);
+			return -1;
+		}
+	}
+	
+	if (item->boottype & BOOT_TYPE_KEXEC) {
+		/* we use var[] instead of *var because sizeof(var) using */
+		const char kexec_path[] = KEXEC_PATH;
+		
+		const char str_cmdline_start[] = "--command-line=";
+		const char str_partition[] = " partition=";
+		const char str_image[] = " image=";
+		const char str_directory[] = " directory=";
+		const char str_initrd_start[] = "--initrd=";
+		
+		const char *load_argv[] = { NULL, "--load-hardboot", item->kernelpath, NULL, "--mem-min=0x84000000", NULL, NULL };
+		const char *exec_argv[] = { NULL, "-e", NULL};
+		
+		char *cmdline_arg = NULL, *initrd_arg = NULL, cmdline[1024];
+		int n;
+		
+		exec_argv[0] = kexec_path;
+		load_argv[0] = kexec_path;
+		
+		/* --command-line arg generation */
+		
+		/* fill '--initrd' option */
+		if (item->initrd) {
+			/* allocate space */
+			n = sizeof(str_initrd_start) + strlen(item->initrd);
+			
+			initrd_arg = (char *)malloc(n);
+			if (NULL == initrd_arg) {
+				log_msg(lg, "Can't allocate memory for initrd_arg");
+			} else {
+				strcpy(initrd_arg, str_initrd_start);	/* --initrd= */
+				strcat(initrd_arg, item->initrd);
+				load_argv[3] = initrd_arg;
+			}
+		}
+		
+		/* fill '--command-line' option */
+		/* load current cmdline */
+		FILE *f;
+		f = fopen("/proc/cmdline", "r");
+		if (NULL == f) {
+			log_msg(lg, "No cmdline!\n");
+			return -1;
+		}
+		fscanf(f, "%[^\n]", cmdline);
+		fclose(f);
+		
 		/* allocate space */
-		n = sizeof(str_cmdline_start) + strlen(item->device) +
-				sizeof(str_ubirootdev) + 2 +
-				sizeof(str_ubimtd) + 2 + sizeof(str_ubimtd_off) + 1 +
-				sizeof(str_rootwait) +
-				sizeof(str_rootfstype) + strlen(item->fstype) + 2 +
-				sizeof(str_mtdparts) + strlenn(params->cfg->mtdparts) +
-				sizeof(str_fbcon) + strlenn(params->cfg->fbcon) +
-				sizeof(char) + strlenn(item->cmdline);
-
+		if (item->boottype & BOOT_TYPE_IMAGE) {
+			n = strlen(str_cmdline_start) + 2 + strlen(cmdline) * 2 + strlen(str_partition)
+			+ strlen(item->device) + strlen(str_image) + strlen(item->image);
+		} else {
+			n = strlen(str_cmdline_start) + 2 + strlen(cmdline) * 2 + strlen(str_partition)
+			+ strlen(item->device) + strlen(str_directory) + strlen(item->directory);;
+		}
+		
 		cmdline_arg = (char *)malloc(n);
 		if (NULL == cmdline_arg) {
-			perror("Can't allocate memory for cmdline_arg");
+			log_msg(lg, "Can't allocate memory for cmdline_arg");
 		} else {
-
-			strcpy(cmdline_arg, str_cmdline_start);	/* --command-line=root= */
-
-			if (item->fstype) {
-
-				/* default fstype to mount */
-				strcpy(mount_fstype, item->fstype);
-
-				/* extra tags when we detect UBI */
-				if (!strncmp(item->fstype,"ubi",3)) {
-
-					/* mtd id [0-15] - one or two digits */
-					if(isdigit(atoi(item->device+strlen(item->device)-2))) {
-						strcpy(str_mtd_id, item->device+strlen(item->device)-2);
-						strcat(str_mtd_id, item->device+strlen(item->device)-1);
-					} else {
-						strcpy(str_mtd_id, item->device+strlen(item->device)-1);
-					}
-					/* get corresponding ubi dev to mount */
-					u = find_attached_ubi_device(str_mtd_id);
-
-					sprintf(mount_dev, "/dev/ubi%d", u);
-					 /* FIXME: first volume is hardcoded */
-					strcat(mount_dev, "_0");
-
-					/* HARDCODED: we assume it's ubifs */
-					strcpy(mount_fstype,"ubifs");
-
-					/* extra cmdline tags when we detect ubi */
-					strcat(cmdline_arg, str_ubirootdev);
-					 /* FIXME: first volume is hardcoded */
-					strcat(cmdline_arg, "_0");
-
-					strcat(cmdline_arg, str_ubimtd);
-					strcat(cmdline_arg, str_mtd_id);
-#ifdef UBI_VID_HDR_OFFSET
-					strcat(cmdline_arg, ",");
-					strcat(cmdline_arg, str_ubimtd_off);
-#endif
-				} else {
-					strcat(cmdline_arg, item->device); /* root=item->device */
-				}
-				strcat(cmdline_arg, str_rootfstype);
-				strcat(cmdline_arg, mount_fstype);
+			strcpy(cmdline_arg, str_cmdline_start);	/* --command-line= */
+			strcat(cmdline_arg, "\"");
+			strcat(cmdline_arg, cmdline);
+			strcat(cmdline_arg, str_partition);
+			strcat(cmdline_arg, item->device);
+			if (item->boottype & BOOT_TYPE_IMAGE) {
+				strcat(cmdline_arg, str_image);
+				strcat(cmdline_arg, item->image);
+			} else {
+				strcat(cmdline_arg, str_directory);
+				strcat(cmdline_arg, item->directory);
 			}
-			strcat(cmdline_arg, str_rootwait);
-
-			if (params->cfg->mtdparts) {
-				strcat(cmdline_arg, str_mtdparts);
-				strcat(cmdline_arg, params->cfg->mtdparts);
-			}
-
-			if (params->cfg->fbcon) {
-				strcat(cmdline_arg, str_fbcon);
-				strcat(cmdline_arg, params->cfg->fbcon);
-			}
-
-			if (item->cmdline) {
-				strcat(cmdline_arg, " ");
-				strcat(cmdline_arg, item->cmdline);
-			}
-			load_argv[idx] = cmdline_arg;
-			++idx;
+			strcat(cmdline_arg, "\"");
+			load_argv[5] = cmdline_arg;
 		}
-	}
-
-	/* fill '--initrd' option */
-	if (item->initrd) {
-		/* allocate space */
-		n = sizeof(str_initrd_start) + strlen(item->initrd);
-
-		initrd_arg = (char *)malloc(n);
-		if (NULL == initrd_arg) {
-			perror("Can't allocate memory for initrd_arg");
-		} else {
-			strcpy(initrd_arg, str_initrd_start);	/* --initrd= */
-			strcat(initrd_arg, item->initrd);
-			load_argv[idx] = initrd_arg;
-			++idx;
+		
+		log_msg(lg, "load_argv: %s, %s, %s, %s, %s, %s\n", load_argv[0],
+			load_argv[1], load_argv[2], load_argv[3], load_argv[4], load_argv[5]);
+			
+		/* Load kernel */
+		//n = fexecw(kexec_path, (char *const *)load_argv, envp);
+		char op[4096];
+		sprintf(op, "%s %s %s %s %s %s", load_argv[0],
+				load_argv[1], load_argv[2], load_argv[3], load_argv[4], load_argv[5]);
+		n = system(op);
+		
+		umount(ROOTFS);
+		if (item->boottype & BOOT_TYPE_IMAGE) {
+			file_fd = open64(item->imagepath, O_RDWR);
+			if (file_fd < 0) {
+				log_msg(lg, "open image file '%s' failed", item->imagepath);
+			}
+			
+			device_fd = open("/dev/loop0", O_RDWR);
+			if (device_fd < 0) {
+				log_msg(lg, "open loop device failed");
+				close(file_fd);
+			}
+			
+			if (ioctl(device_fd, LOOP_CLR_FD, file_fd) < 0) {
+				log_msg(lg, "ioctl LOOP_CLR_FD failed");
+				close(file_fd);
+				close(device_fd);
+			}
+			
+			if (file_fd >= 0) close(file_fd);
+			if (device_fd >= 0) close(device_fd);
+			
+			umount(MOUNTPOINT);
 		}
+			
+		dispose(cmdline_arg);
+		dispose(initrd_arg);
+		
+		log_msg(lg, "exec_argv: %s, %s", exec_argv[0], exec_argv[1]);
+			
+		/* Boot new kernel */
+		//execve(kexec_path, (char *const *)exec_argv, envp);
+		system("kexec -e");
+	} else {
+		
 	}
-
-	/* Append kernelpath as last arg of kexec */
-	load_argv[idx] = item->kernelpath;
-
-	DPRINTF("load_argv: %s, %s, %s, %s, %s", load_argv[0],
-			load_argv[1], load_argv[2],
-			load_argv[3], load_argv[4]);
-
-	/* Mount boot device */
-	if ( -1 == mount(mount_dev, mount_point, mount_fstype,
-			MS_RDONLY, NULL) ) {
-		perror("Can't mount boot device");
-		exit(-1);
-	}
-
-	/* Load kernel */
-	n = fexecw(kexec_path, (char *const *)load_argv, envp);
-	if (-1 == n) {
-		perror("Kexec can't load kernel");
-		exit(-1);
-	}
-
-	umount(mount_point);
-
-	dispose(cmdline_arg);
-	dispose(initrd_arg);
-
-	/* Check /proc/sys/net presence */
-	if ( -1 == stat("/proc/sys/net", &sinfo) ) {
-		if (ENOENT == errno) {
-			/* We have no network, don't issue ifdown() while kexec'ing */
-			exec_argv[2] = "-x";
-			DPRINTF("No network is detected, disabling ifdown()");
-		} else {
-			perror("Can't stat /proc/sys/net");
-		}
-	}
-
-	DPRINTF("exec_argv: %s, %s, %s", exec_argv[0],
-			exec_argv[1], exec_argv[2]);
-
-	/* Boot new kernel */
-	execve(kexec_path, (char *const *)exec_argv, envp);
+	
+	return -1;
 }
 
 
@@ -369,158 +360,69 @@ int scan_devices(struct params_t *params)
 {
 	struct charlist *fl;
 	struct bootconf_t *bootconf;
-	struct device_t dev;
 	struct cfgdata_t cfgdata;
-	int rc,n;
-	FILE *f;
-
-	char mount_dev[16];
-	char mount_fstype[16];
-	char str_mtd_id[3];
-
-#ifdef USE_ICONS
+	char cfgpath[256];
+	int rc;
+	
+/*#ifdef USE_ICONS
 	kx_cfg_section *sc;
 	int i;
 	int rows;
 	char **xpm_data;
+#endif*/
 
-#endif
+	init_cfgdata(&cfgdata);
 
 	bootconf = create_bootcfg(4);
 	if (NULL == bootconf) {
 		DPRINTF("Can't allocate bootconf structure");
 		return -1;
 	}
-
-	f = devscan_open(&fl);
-	if (NULL == f) {
-		log_msg(lg, "Can't initiate device scan");
+	
+	rc = devscan_open(&fl);
+	if (-1 == rc) {
+		log_msg(lg, "can't open device\n");
 		return -1;
 	}
-
-#ifdef USE_ZAURUS
-	struct zaurus_partinfo_t pinfo;
-	int zaurus_error = 0;
-	zaurus_error = zaurus_read_partinfo(&pinfo);
-	if (0 == zaurus_error) {
-		/* Fix mtdparts tag */
-		dispose(params->cfg->mtdparts);
-		params->cfg->mtdparts = zaurus_mtdparts(&pinfo);
-	}
-#endif
-
-	for (;;) {
-		rc = devscan_next(f, fl, &dev);
-		if (rc < 0) continue;	/* Error */
-		if (0 == rc) break;		/* EOF */
-
-		/* initialize with defaults */
-		strcpy(mount_dev, dev.device);
-		strcpy(mount_fstype, dev.fstype);
-
-		/* We found an ubi erase counter */
-		if (!strncmp(dev.fstype, "ubi",3)) {
-
-			/* attach ubi boot device - mtd id [0-15] */
-			if(isdigit(atoi(dev.device+strlen(dev.device)-2))) {
-				strcpy(str_mtd_id, dev.device+strlen(dev.device)-2);
-				strcat(str_mtd_id, dev.device+strlen(dev.device)-1);
-			} else {
-				strcpy(str_mtd_id, dev.device+strlen(dev.device)-1);
-			}
-			n = ubi_attach(str_mtd_id);
-
-			/* we have attached ubiX and we mount /dev/ubiX_0  */
-			sprintf(mount_dev, "/dev/ubi%d", n);
-			 /* HARDCODED: first volume */
-			strcat(mount_dev, "_0");
-
-			/* HARDCODED: we assume it's ubifs */
-			strcpy(mount_fstype, "ubifs");
-		}
-
-		/* Mount device */
-		if (-1 == mount(mount_dev, MOUNTPOINT, mount_fstype, MS_RDONLY, NULL)) {
-			log_msg(lg, "+ can't mount device %s: %s", mount_dev, ERRMSG);
-			goto free_device;
-		}
-
-		/* NOTE: Don't go out before umount'ing */
-
-		/* Search boot method and return boot info */
-		rc = get_bootinfo(&cfgdata);
-
-		if (-1 == rc) {	/* Error */
-			goto umount;
-		}
-
-#ifdef USE_ICONS
-		/* Iterate over sections found */
-		if (params->gui) {
-			for (i = 0; i < cfgdata.count; i++) {
-				sc = cfgdata.list[i];
-				if (!sc) continue;
-
-				/* Load custom icon */
-				if (sc->iconpath) {
-					rows = xpm_load_image(&xpm_data, sc->iconpath);
-					if (-1 == rows) {
-						log_msg(lg, "+ can't load xpm icon %s", sc->iconpath);
-						continue;
-					}
-
-					sc->icondata = xpm_parse_image(xpm_data, rows);
-					if (!sc->icondata) {
-						log_msg(lg, "+ can't parse xpm icon %s", sc->iconpath);
-						continue;
-					}
-					xpm_destroy_image(xpm_data, rows);
-				}
-			}
-		}
-#endif
-
-umount:
-		/* Umount device */
-		if (-1 == umount(MOUNTPOINT)) {
-			log_msg(lg, "+ can't umount device: %s", ERRMSG);
-			goto free_cfgdata;
-		}
-
-		if (-1 == rc) {	/* Error */
-			goto free_cfgdata;
-		}
-
-#ifdef USE_ZAURUS
-		/* Fix partition sizes. We can have kernel in root and home partitions on NAND */
-		/* HACK: mtdblock devices are hardcoded */
-		if (0 == zaurus_error) {
-			if (0 == strcmp(dev.device, "/dev/mtdblock2")) {	/* root */
-				log_msg(lg, "+ [zaurus root] size of %s will be changed from %llu to %lu",
-						dev.device, dev.blocks, pinfo.root);
-				dev.blocks = pinfo.root;
-			} else if (0 == strcmp(dev.device, "/dev/mtdblock3")) {	/* home */
-				log_msg(lg, "+ [zaurus home] size of %s will be changed from %llu to %lu",
-						dev.device, dev.blocks, pinfo.home);
-				dev.blocks = pinfo.home;
-			}
-		}
-#endif
-
-		/* Now we have something in cfgdata */
-		rc = addto_bootcfg(bootconf, &dev, &cfgdata);
-
-free_cfgdata:
-		destroy_cfgdata(&cfgdata);
-free_device:
-		free(dev.device);
+	
+	mkdir(MOUNTPOINT, 0666);
+	mkdir(ROOTFS, 0666);
+	if (-1 == mount(MMCBLK_BOOTCONF, MOUNTPOINT, MMCBLK_BOOTCONF_FSTYPE, MS_RDONLY, NULL)) {
+		log_msg(lg, "+ can't mount bootconf device '%s': %s", MMCBLK_BOOTCONF, ERRMSG);
+		goto end_scan_devices;
 	}
 
-	free_charlist(fl);
+	DIR* dir;
+	struct dirent* entry;
+	dir = opendir(BOOTCONF_PATH);
+	if (dir != NULL) {
+		for (;;) {
+			entry = readdir(dir);
+			if (entry == NULL) break;
+			if (entry->d_type & DT_DIR) continue;
+			log_msg(lg, "Configuration File: %s Found!\n", entry->d_name);
+			
+			sprintf(cfgpath, "%s/%s", BOOTCONF_PATH, entry->d_name);
+			parse_cfgfile(cfgpath, &cfgdata);
+		}
+		
+		closedir(dir);
+	} else {
+		log_msg(lg, "Configuration File NOT Found!\n");
+	}
+	
+	if (-1 == umount(MOUNTPOINT)) {
+		log_msg(lg, "+ can't umount device: %s", ERRMSG);
+		goto end_scan_devices;
+	}
+	
+	addto_bootcfg(bootconf, fl, &cfgdata);
+	destroy_cfgdata(&cfgdata);
+	
+end_scan_devices:
 	params->bootcfg = bootconf;
 	return 0;
 }
-
 
 /* Create system menu */
 kx_menu *build_menu(struct params_t *params)
@@ -1110,7 +1012,7 @@ int main(int argc, char **argv)
 	menu_destroy(params.menu, 0);
 
 	if (rc >= A_DEVICES) {
-		start_kernel(&params, rc - A_DEVICES);
+		start_booting(&params, rc - A_DEVICES);
 	}
 
 	/* When we reach this point then some error has occured */

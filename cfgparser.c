@@ -57,11 +57,16 @@ kx_cfg_section *cfg_section_new(struct cfgdata_t *cfgdata)
 	}
 
 	sc->label = NULL;
+	sc->device = NULL;
 	sc->kernelpath = NULL;
 	sc->cmdline = NULL;
 	sc->initrd = NULL;
+	sc->directory = NULL;
+	sc->imagepath = NULL;
+	sc->image = NULL;
 	sc->iconpath = NULL;
 	sc->icondata = NULL;
+	sc->boottype = 0;
 	sc->priority = 0;
 	sc->is_default = 0;
 
@@ -126,6 +131,18 @@ static int set_label(struct cfgdata_t *cfgdata, char *value)
 	return 0;
 }
 
+static int set_device(struct cfgdata_t *cfgdata, char *value)
+{
+	kx_cfg_section *sc;
+	
+	sc = cfgdata->current;
+	if (!sc) return -1;
+	
+	dispose(sc->device);
+	sc->device = strdup(value);
+	return 0;
+}
+
 static int set_kernel(struct cfgdata_t *cfgdata, char *value)
 {
 	kx_cfg_section *sc;
@@ -135,14 +152,57 @@ static int set_kernel(struct cfgdata_t *cfgdata, char *value)
 
 	dispose(sc->kernelpath);
 	/* Add our mountpoint, since the enduser won't know it */
-	sc->kernelpath = malloc(strlen(MOUNTPOINT)+strlen(value)+1);
+	sc->kernelpath = malloc(strlen(ROOTFS)+strlen(value)+1);
 	if (NULL == sc->kernelpath) {
 		DPRINTF("Can't allocate memory to store kernelpath '%s'", value);
 		return -1;
 	}
 
-	strcpy(sc->kernelpath, "/mnt");
+	strcpy(sc->kernelpath, ROOTFS);
 	strcat(sc->kernelpath, value);
+	return 0;
+}
+
+static int set_directory(struct cfgdata_t *cfgdata, char *value)
+{
+	kx_cfg_section *sc;
+	
+	sc = cfgdata->current;
+	if (!sc) return -1;
+	
+	dispose(sc->directory);
+	/* Add our mountpoint, since the enduser won't know it */
+	sc->directory = malloc(strlen(ROOTFS)+strlen(value)+1);
+	if (NULL == sc->directory) {
+		DPRINTF("Can't allocate memory to store directory '%s'", value);
+		return -1;
+	}
+	
+	strcpy(sc->directory, ROOTFS);
+	strcat(sc->directory, value);
+	return 0;
+}
+
+static int set_image(struct cfgdata_t *cfgdata, char *value)
+{
+	kx_cfg_section *sc;
+	
+	sc = cfgdata->current;
+	if (!sc) return -1;
+	
+	dispose(sc->imagepath);
+	/* Add our mountpoint, since the enduser won't know it */
+	sc->imagepath = malloc(strlen(MOUNTPOINT)+strlen(value)+1);
+	if (NULL == sc->imagepath) {
+		DPRINTF("Can't allocate memory to store imagepath '%s'", value);
+		return -1;
+	}
+	
+	strcpy(sc->imagepath, MOUNTPOINT);
+	strcat(sc->imagepath, value);
+	
+	dispose(sc->image);
+	sc->image = strdup(value);
 	return 0;
 }
 
@@ -155,13 +215,13 @@ static int set_icon(struct cfgdata_t *cfgdata, char *value)
 
 	dispose(sc->iconpath);
 	/* Add our mountpoint, since the enduser won't know it */
-	sc->iconpath = malloc(sizeof(MOUNTPOINT)+strlen(value));
+	sc->iconpath = malloc(sizeof(ROOTFS)+strlen(value));
 	if (NULL == sc->iconpath) {
 		DPRINTF("Can't allocate memory to store iconpath '%s'", value);
 		return -1;
 	}
 
-	strcpy(sc->iconpath, MOUNTPOINT);
+	strcpy(sc->iconpath, ROOTFS);
 	strcat(sc->iconpath, value);
 
 	return 0;
@@ -188,14 +248,30 @@ static int set_initrd(struct cfgdata_t *cfgdata, char *value)
 
 	dispose(sc->initrd);
 	/* Add our mountpoint, since the enduser won't know it */
-	sc->initrd = malloc(strlen(MOUNTPOINT)+strlen(value)+1);
+	sc->initrd = malloc(strlen(ROOTFS)+strlen(value)+1);
 	if (NULL == sc->initrd) {
 		DPRINTF("Can't allocate memory to store initrd '%s'", value);
 		return -1;
 	}
 
-	strcpy(sc->initrd, "/mnt");
+	strcpy(sc->initrd, ROOTFS);
 	strcat(sc->initrd, value);
+	return 0;
+}
+
+static int set_boot_type(struct cfgdata_t *cfgdata, char *value)
+{
+	kx_cfg_section *sc;
+	
+	sc = cfgdata->current;
+	if (!sc) return -1;
+	
+	sc->boottype = get_nni(value, NULL);
+	if (sc->boottype < 0) {
+		log_msg(lg, "Can't convert '%s' to integer", value);
+		sc->boottype = 0;
+		return -1;
+	}
 	return 0;
 }
 
@@ -374,10 +450,14 @@ static struct cfg_keyfunc_t cfg_keyfunc[] = {
 	/* Individual item settings */
 	{ CFG_FILE, 0, "DEFAULT", set_default },
 	{ CFG_FILE, 1, "LABEL", set_label },
+	{ CFG_FILE, 1, "DEVICE", set_device },
 	{ CFG_FILE, 1, "KERNEL", set_kernel },
+	{ CFG_FILE, 1, "DIR", set_directory },
+	{ CFG_FILE, 1, "IMAGE", set_image },
 	{ CFG_FILE, 1, "ICON", set_icon },
 	{ CFG_FILE, 1, "APPEND", set_cmdline },
 	{ CFG_FILE, 1, "INITRD", set_initrd },
+	{ CFG_FILE, 1, "BOOT", set_boot_type },
 	{ CFG_FILE, 1, "PRIORITY", set_priority },
 	{ CFG_CMDLINE, 1, "FBCON", set_fbcon },
 	{ CFG_CMDLINE, 1, "MTDPARTS", set_mtdparts },
@@ -393,7 +473,7 @@ int process_keyword(enum cfg_type_t cfg_type, struct cfgdata_t *cfgdata, char *k
 	struct cfg_keyfunc_t *kf;
 	char ukey[strlen(keyword) + 1];
 
-	/* For convenience convert keyword to lowercase */
+	/* For convenience convert keyword to uppercase */
 	strtoupper(keyword, ukey);
 
 	/* See if given keyword is known and call appropriate function */
@@ -401,7 +481,6 @@ int process_keyword(enum cfg_type_t cfg_type, struct cfgdata_t *cfgdata, char *k
 		if (cfg_type != kf->type) continue;
 		if (0 == strcmp(ukey, kf->keyword)) {
 			if ( (1 == kf->has_value) && (NULL == value) ) {
-				log_msg(lg, "+ keyword '%s' should have value", ukey);
 				return -1;
 			}
 			return kf->keyfunc(cfgdata, value);

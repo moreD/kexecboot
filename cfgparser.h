@@ -22,19 +22,33 @@
 #include "config.h"
 #include "util.h"
 
-#define MOUNTPOINT	"/mnt"
-#define BOOTCFG_PATH MOUNTPOINT "/boot/boot.cfg"
+#define MOUNTPOINT				"/mnt"
+#define ROOTFS					"/root"
+#define MMCBLK_BOOTCONF			"/dev/mmcblk0p5"
+#define MMCBLK_BOOTCONF_FSTYPE	"vfat"
+#define BOOTCONF_PATH			MOUNTPOINT "/multiboot"
+#define BOOTCFG_PATH 			MOUNTPOINT "/boot/boot.cfg"
+
+/* define BOOT TYPE */
+#define BOOT_TYPE_LINUX		0x1
+#define BOOT_TYPE_KEXEC		0x2
+#define BOOT_TYPE_IMAGE		0x4
 
 enum ui_type_t { GUI, TEXTUI };
 
 typedef struct {
 	char *label;		/* Partition label (name) */
+	char *device;		/* Device name */
 	char *kernelpath;	/* Found kernel (/boot/zImage) */
 	char *cmdline;		/* Kernel cmdline (logo.nologo debug) */
 	char *initrd;		/* Initial ramdisk file */
 	char *iconpath;		/* Custom partition icon path */
+	char *directory;	/* Boot directory */
+	char *image;		/* Partition image */
+	char *imagepath;	/* Partition image file */
 	void *icondata;		/* Icon data */
 	int is_default;		/* Use section as default? */
+	int boottype;		/* Boot type */
 	int priority;		/* Priority of item in menu */
 } kx_cfg_section;
 

@@ -118,7 +118,7 @@ log_plain_msg(kx_text *log, char *msg)
 /* Log message */
 void log_msg(kx_text *log, char *fmt, ...)
 {
-	static char *b, *e, buf[512];
+	static char *b, *e, buf[1024];
 	static va_list ap;
 
 	/* Format string */

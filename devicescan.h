@@ -25,7 +25,7 @@
 /* Device structure */
 struct device_t {
 	char *device;		/* Device path (/dev/mmcblk0p1) */
-	const char *fstype;	/* Filesystem (ext2) */
+	const char *fstype;	/* Filesystem (ext4) */
 	unsigned long long blocks;	/* Device size in 1K blocks */
 };
 
@@ -39,13 +39,17 @@ enum dtype_t {
 /* Boot item structure */
 struct boot_item_t {
 	char *device;		/* Device path (/dev/mmcblk0p1) */
-	const char *fstype;	/* Filesystem (ext2) */
+	const char *fstype;	/* Filesystem (ext4) */
 	unsigned long long blocks;	/* Device size in 1K blocks */
 	char *label;		/* Partition label (name) */
 	char *kernelpath;	/* Found kernel (/boot/zImage) */
 	char *cmdline;		/* Kernel cmdline (logo.nologo debug) */
 	char *initrd;		/* Initial ramdisk file */
+	char *directory;	/* Boot directory */
+	char *image;		/* Partition image */
+	char *imagepath;	/* Partition image file */
 	void *icondata;		/* Icon data */
+	int boottype;		/* Boot type */
 	int priority;		/* Priority of item in menu */
 	enum dtype_t dtype;	/* Device type */
 };
@@ -66,10 +70,10 @@ extern char *machine_kernel;
 extern char *default_kernels[];
 
 /* Prepare devicescan loop */
-FILE *devscan_open(struct charlist **fslist);
+int devscan_open(struct charlist **fslist);
 
 /* Get next device (fp & fslist in, dev out) */
-int devscan_next(FILE *fp, struct charlist *fslist, struct device_t *dev);
+int devscan(char *device, struct charlist *fslist, struct device_t *dev);
 
 /* Allocate bootconf structure */
 struct bootconf_t *create_bootcfg(unsigned int size);
@@ -78,7 +82,7 @@ struct bootconf_t *create_bootcfg(unsigned int size);
 void free_bootcfg(struct bootconf_t *bc);
 
 /* Import values from cfgdata and boot to bootconf */
-int addto_bootcfg(struct bootconf_t *bc, struct device_t *dev,
+int addto_bootcfg(struct bootconf_t *bc, struct charlist *fl,
 		struct cfgdata_t *cfgdata);
 
 /* Check and parse config file */
