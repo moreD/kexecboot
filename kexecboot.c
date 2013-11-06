@@ -178,6 +178,7 @@ int start_booting(struct params_t *params, int choice)
 {
 	struct boot_item_t *item;
 	int file_fd, device_fd;
+	char op[4096];
 	
 	item = params->bootcfg->list[choice];
 	
@@ -195,21 +196,21 @@ int start_booting(struct params_t *params, int choice)
 		
 		file_fd = open64(item->imagepath, O_RDWR);
 		if (file_fd < 0) {
-			log_msg(lg, "open image file '%s' failed", item->imagepath);
+			log_msg(lg, "+ open image file '%s' failed", item->imagepath);
 			umount(MOUNTPOINT);
 			return -1;
 		}
 		
 		device_fd = open("/dev/loop0", O_RDWR);
 		if (device_fd < 0) {
-			log_msg(lg, "open loop device failed");
+			log_msg(lg, "+ open loop device failed");
 			close(file_fd);
 			umount(MOUNTPOINT);
 			return -1;
 		}
 		
 		if (ioctl(device_fd, LOOP_SET_FD, file_fd) < 0) {
-			log_msg(lg, "ioctl LOOP_SET_FD failed");
+			log_msg(lg, "+ ioctl LOOP_SET_FD failed");
 			close(file_fd);
 			close(device_fd);
 			umount(MOUNTPOINT);
@@ -220,13 +221,16 @@ int start_booting(struct params_t *params, int choice)
 		close(device_fd);
 		
 		mount("/dev/loop0", ROOTFS, "ext4", 0, NULL);
-
-		log_msg(lg, "Image mounted!\n");
+		
 	} else {
-		if (-1 == mount(item->device, ROOTFS, item->fstype, 0, NULL)) {
+		if (-1 == mount(item->device, MOUNTPOINT, item->fstype, 0, NULL)) {
 			log_msg(lg, "+ can't mount boot device '%s': %s", item->device, ERRMSG);
 			return -1;
 		}
+		
+		rmdir(ROOTFS);
+		sprintf(op, "ln -s %s%s %s", MOUNTPOINT, item->directory, ROOTFS);
+		system(op);
 	}
 	
 	if (item->boottype & BOOT_TYPE_KEXEC) {
@@ -239,11 +243,17 @@ int start_booting(struct params_t *params, int choice)
 		const char str_directory[] = " directory=";
 		const char str_initrd_start[] = "--initrd=";
 		
-		const char *load_argv[] = { NULL, "--load-hardboot", item->kernelpath, NULL, "--mem-min=0x84000000", NULL, NULL };
+		const char *load_argv[] = { NULL, "--load-hardboot", NULL, NULL, "--mem-min=0x84000000", NULL, NULL };
 		const char *exec_argv[] = { NULL, "-e", NULL};
 		
-		char *cmdline_arg = NULL, *initrd_arg = NULL, cmdline[1024];
+		char *cmdline_arg = NULL, *initrd_arg = NULL, cmdline[1024], *kernel_arg = NULL;
 		int n;
+		
+		n = 32 + strlen(item->kernelpath);
+		kernel_arg = (char *)malloc(n);
+		strcpy(kernel_arg, ROOTFS);
+		strcat(kernel_arg, item->kernelpath);
+		load_argv[2] = kernel_arg;
 		
 		exec_argv[0] = kexec_path;
 		load_argv[0] = kexec_path;
@@ -253,13 +263,14 @@ int start_booting(struct params_t *params, int choice)
 		/* fill '--initrd' option */
 		if (item->initrd) {
 			/* allocate space */
-			n = sizeof(str_initrd_start) + strlen(item->initrd);
+			n = sizeof(str_initrd_start) + strlen(item->initrd) + 32;
 			
 			initrd_arg = (char *)malloc(n);
 			if (NULL == initrd_arg) {
 				log_msg(lg, "Can't allocate memory for initrd_arg");
 			} else {
 				strcpy(initrd_arg, str_initrd_start);	/* --initrd= */
+				strcat(initrd_arg, ROOTFS);
 				strcat(initrd_arg, item->initrd);
 				load_argv[3] = initrd_arg;
 			}
@@ -278,11 +289,11 @@ int start_booting(struct params_t *params, int choice)
 		
 		/* allocate space */
 		if (item->boottype & BOOT_TYPE_IMAGE) {
-			n = strlen(str_cmdline_start) + 2 + strlen(cmdline) * 2 + strlen(str_partition)
+			n = strlen(str_cmdline_start) + 32 + strlen(cmdline) * 2 + strlen(str_partition)
 			+ strlen(item->device) + strlen(str_image) + strlen(item->image);
 		} else {
-			n = strlen(str_cmdline_start) + 2 + strlen(cmdline) * 2 + strlen(str_partition)
-			+ strlen(item->device) + strlen(str_directory) + strlen(item->directory);;
+			n = strlen(str_cmdline_start) + 32 + strlen(cmdline) * 2 + strlen(str_partition)
+			+ strlen(item->device) + strlen(str_directory) + strlen(item->directory);
 		}
 		
 		cmdline_arg = (char *)malloc(n);
@@ -310,7 +321,6 @@ int start_booting(struct params_t *params, int choice)
 			
 		/* Load kernel */
 		//n = fexecw(kexec_path, (char *const *)load_argv, envp);
-		char op[4096];
 		sprintf(op, "%s %s %s %s %s %s", load_argv[0],
 				load_argv[1], load_argv[2], load_argv[3], load_argv[4], load_argv[5]);
 		n = system(op);
@@ -349,6 +359,7 @@ int start_booting(struct params_t *params, int choice)
 		//execve(kexec_path, (char *const *)exec_argv, envp);
 		system("kexec -e");
 	} else {
+		
 		
 	}
 	

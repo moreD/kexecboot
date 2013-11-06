@@ -158,8 +158,8 @@ static int set_kernel(struct cfgdata_t *cfgdata, char *value)
 		return -1;
 	}
 
-	strcpy(sc->kernelpath, ROOTFS);
-	strcat(sc->kernelpath, value);
+	//strcpy(sc->kernelpath, ROOTFS);
+	strcpy(sc->kernelpath, value);
 	return 0;
 }
 
@@ -178,8 +178,8 @@ static int set_directory(struct cfgdata_t *cfgdata, char *value)
 		return -1;
 	}
 	
-	strcpy(sc->directory, ROOTFS);
-	strcat(sc->directory, value);
+	//strcpy(sc->directory, ROOTFS);
+	strcpy(sc->directory, value);
 	return 0;
 }
 
@@ -221,8 +221,8 @@ static int set_icon(struct cfgdata_t *cfgdata, char *value)
 		return -1;
 	}
 
-	strcpy(sc->iconpath, ROOTFS);
-	strcat(sc->iconpath, value);
+	//strcpy(sc->iconpath, ROOTFS);
+	strcpy(sc->iconpath, value);
 
 	return 0;
 }
@@ -254,8 +254,8 @@ static int set_initrd(struct cfgdata_t *cfgdata, char *value)
 		return -1;
 	}
 
-	strcpy(sc->initrd, ROOTFS);
-	strcat(sc->initrd, value);
+	//strcpy(sc->initrd, ROOTFS);
+	strcpy(sc->initrd, value);
 	return 0;
 }
 
