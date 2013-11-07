@@ -162,7 +162,7 @@ char *get_machine_kernelpath() {
 			return NULL;
 		}
 
-		strcpy(tmp, "/mnt/boot/zImage-");
+		strcpy(tmp, "/mnt/boot/zImage");
 		strcat(tmp, hw);
 
 		return tmp;
@@ -185,7 +185,18 @@ int start_booting(struct params_t *params, int choice)
 	if ( ! (item->boottype & BOOT_TYPE_LINUX)) {
 		char *const envp[] = { NULL };
 		const char *exec_argv[] = { "/init-android", NULL};
+		system("echo -n 0 > /sys/class/vtconsole/vtcon0/bind");
+		system("echo -n 0 > /sys/class/vtconsole/vtcon1/bind");
+		
+		umount("/dev/pts");
+		umount("/dev");
+		umount("/sys");
+		umount("/proc");
+		umount("/run");
+		umount("/data");
+		
 		execve("/init-android", (char *const *)exec_argv, envp);
+		return -1;
 	}
 	
 	if (item->boottype & BOOT_TYPE_IMAGE) {
@@ -228,8 +239,7 @@ int start_booting(struct params_t *params, int choice)
 			return -1;
 		}
 		
-		rmdir(ROOTFS);
-		sprintf(op, "ln -s %s%s %s", MOUNTPOINT, item->directory, ROOTFS);
+		sprintf(op, "mount --bind %s%s %s", MOUNTPOINT, item->directory, ROOTFS);
 		system(op);
 	}
 	
@@ -360,7 +370,7 @@ int start_booting(struct params_t *params, int choice)
 		system("kexec -e");
 	} else {
 		
-		
+		system("init-linux");
 	}
 	
 	return -1;
